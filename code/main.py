@@ -912,34 +912,34 @@ class MemoryVisualizer:
         # Create performance metrics panel in right frame
         self.performance_frame = ttk.LabelFrame(right_frame, text="Performance Metrics", padding=10)
         self.performance_frame.pack(fill="x", pady=5)
-        
+
         # Create metrics display areas
         self.metrics_labels = {}
-        
+
         # Memory Usage Metrics
         memory_frame = ttk.LabelFrame(self.performance_frame, text="Memory Usage", padding=5)
         memory_frame.pack(fill="x", pady=5)
-        
+
         self.metrics_labels["current_usage"] = ttk.Label(memory_frame, text="Current Usage: 0 units")
         self.metrics_labels["current_usage"].pack(anchor="w")
-        
+
         self.metrics_labels["peak_memory"] = ttk.Label(memory_frame, text="Peak Memory: 0 units")
         self.metrics_labels["peak_memory"].pack(anchor="w")
-        
+
         # Page Management Metrics
         page_frame = ttk.LabelFrame(self.performance_frame, text="Page Management", padding=5)
         page_frame.pack(fill="x", pady=5)
-        
+
         self.metrics_labels["hit_ratio"] = ttk.Label(page_frame, text="Hit Ratio: 0%")
         self.metrics_labels["hit_ratio"].pack(anchor="w")
-        
+
         self.metrics_labels["fault_ratio"] = ttk.Label(page_frame, text="Fault Ratio: 0%")
         self.metrics_labels["fault_ratio"].pack(anchor="w")
-        
+
         # Algorithm Performance
         algo_frame = ttk.LabelFrame(self.performance_frame, text="Algorithm Performance", padding=5)
         algo_frame.pack(fill="x", pady=5)
-        
+
         self.metrics_labels["algorithm_stats"] = {}
         for algorithm in ["first_fit", "best_fit", "worst_fit", "next_fit"]:
             self.metrics_labels["algorithm_stats"][algorithm] = ttk.Label(
@@ -947,19 +947,56 @@ class MemoryVisualizer:
                 text=f"{algorithm.replace('_', ' ').title()}: 0% success rate"
             )
             self.metrics_labels["algorithm_stats"][algorithm].pack(anchor="w")
-        
+
         # Operation Times
         time_frame = ttk.LabelFrame(self.performance_frame, text="Operation Times", padding=5)
         time_frame.pack(fill="x", pady=5)
-        
+
         self.metrics_labels["avg_allocation"] = ttk.Label(time_frame, text="Avg Allocation Time: 0.0s")
         self.metrics_labels["avg_allocation"].pack(anchor="w")
-        
+
         self.metrics_labels["avg_deallocation"] = ttk.Label(time_frame, text="Avg Deallocation Time: 0.0s")
         self.metrics_labels["avg_deallocation"].pack(anchor="w")
-        
+
         # Add access pattern graph below performance metrics
         self.add_access_pattern_graph(right_frame)
+
+        # Add Fragmentation Analysis Frame
+        fragmentation_frame = ttk.LabelFrame(right_frame, text="Fragmentation Analysis", padding=10)
+        fragmentation_frame.pack(fill="x", pady=5)
+
+        # Create fragmentation metrics labels
+        self.fragmentation_labels = {}
+        self.fragmentation_labels["external"] = ttk.Label(fragmentation_frame, text="External Fragmentation: 0%")
+        self.fragmentation_labels["external"].pack(anchor="w")
+
+        self.fragmentation_labels["internal"] = ttk.Label(fragmentation_frame, text="Internal Fragmentation: 0%")
+        self.fragmentation_labels["internal"].pack(anchor="w")
+
+        self.fragmentation_labels["wasted"] = ttk.Label(fragmentation_frame, text="Total Wasted Space: 0 units")
+        self.fragmentation_labels["wasted"].pack(anchor="w")
+
+        # Add Process Scheduling Frame
+        scheduling_frame = ttk.LabelFrame(right_frame, text="Process Scheduling", padding=10)
+        scheduling_frame.pack(fill="x", pady=5)
+
+        # Create scheduling metrics labels
+        self.scheduling_labels = {}
+        self.scheduling_labels["queue"] = ttk.Label(scheduling_frame, text="Processes in Queue: 0")
+        self.scheduling_labels["queue"].pack(anchor="w")
+
+        self.scheduling_labels["avg_wait"] = ttk.Label(scheduling_frame, text="Average Wait Time: 0.0s")
+        self.scheduling_labels["avg_wait"].pack(anchor="w")
+
+        self.scheduling_labels["cpu_util"] = ttk.Label(scheduling_frame, text="CPU Utilization: 0%")
+        self.scheduling_labels["cpu_util"].pack(anchor="w")
+
+        # Add recommendations frame
+        recommendations_frame = ttk.LabelFrame(right_frame, text="Recommendations", padding=10)
+        recommendations_frame.pack(fill="x", pady=5)
+
+        self.recommendations_text = tk.Text(recommendations_frame, height=4, wrap=tk.WORD)
+        self.recommendations_text.pack(fill="x", expand=True)
         
         # Initially hide paging and segmentation controls
         self.paging_frame.grid_remove()
@@ -1764,6 +1801,48 @@ class MemoryVisualizer:
             self.metrics_labels["avg_deallocation"].config(
                 text=f"Avg Deallocation Time: {avg_dealloc:.3f}s"
             )
+
+        # Update fragmentation analysis
+        frag_report = self.memory_manager.get_fragmentation_report()
+        self.fragmentation_labels["external"].config(
+            text=f"External Fragmentation: {frag_report['current_metrics']['external_fragmentation']:.1f}%"
+        )
+        self.fragmentation_labels["internal"].config(
+            text=f"Internal Fragmentation: {frag_report['current_metrics']['internal_fragmentation']:.1f}%"
+        )
+        self.fragmentation_labels["wasted"].config(
+            text=f"Total Wasted Space: {frag_report['current_metrics']['total_wasted_space']} units"
+        )
+        
+        # Update scheduling metrics
+        sched_report = self.memory_manager.get_scheduling_report()
+        self.scheduling_labels["queue"].config(
+            text=f"Processes in Queue: {sched_report['queue_status']['total_processes']}"
+        )
+
+        # Calculate average wait time safely
+        waiting_times = sched_report['queue_status']['waiting_times']
+        if waiting_times:
+            avg_wait = sum(data['current_wait'] for data in waiting_times.values()) / len(waiting_times)
+        else:
+            avg_wait = 0.0
+
+        self.scheduling_labels["avg_wait"].config(
+            text=f"Average Wait Time: {avg_wait:.1f}s"
+        )
+
+        self.scheduling_labels["cpu_util"].config(
+            text=f"CPU Utilization: {sched_report['queue_status']['cpu_utilization']:.1f}%"
+        )
+        
+        # Update recommendations
+        self.recommendations_text.delete(1.0, tk.END)
+        recommendations = frag_report['recommendations'] + sched_report['recommendations']
+        if recommendations:
+            for rec in recommendations:
+                self.recommendations_text.insert(tk.END, f"• {rec}\n")
+        else:
+            self.recommendations_text.insert(tk.END, "No recommendations at this time.")
 
     def calculate_fragmentation(self):
         """Calculate external fragmentation percentage"""
