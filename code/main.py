@@ -922,26 +922,118 @@ class MemoryVisualizer:
     def access_page(self):
         """Simulate page access"""
         try:
-            process_id = self.page_process_entry.get()
-            page_number = int(self.page_number_entry.get())
+            process_id = self.page_process_entry.get().strip()
+            page_number_str = self.page_number_entry.get().strip()
             
+            # Check if fields are empty
             if not process_id:
-                messagebox.showerror("Error", "Please enter a Process ID")
+                messagebox.showwarning(
+                    "Missing Information",
+                    "Please enter a Process ID.\n\n"
+                    "Example: P1, P2, etc.\n"
+                    "Tip: You can find valid Process IDs in the Active Processes list."
+                )
+                return
+            
+            if not page_number_str:
+                messagebox.showwarning(
+                    "Missing Information",
+                    "Please enter a Page Number.\n\n"
+                    "Example: 0, 1, 2, etc.\n"
+                    "Tip: Page numbers start from 0."
+                )
+                return
+            
+            # Validate process ID format
+            if not process_id.startswith('P'):
+                messagebox.showerror(
+                    "Invalid Process ID",
+                    f"The Process ID '{process_id}' is invalid.\n\n"
+                    "Process IDs must start with 'P' followed by a number.\n"
+                    "Example: P1, P2, P3, etc.\n\n"
+                    "Please check the Active Processes list for valid Process IDs."
+                )
+                return
+            
+            # Convert and validate page number
+            try:
+                page_number = int(page_number_str)
+            except ValueError:
+                messagebox.showerror(
+                    "Invalid Page Number",
+                    f"The Page Number '{page_number_str}' is invalid.\n\n"
+                    "Page numbers must be whole numbers.\n"
+                    "Example: 0, 1, 2, etc.\n"
+                    "Please enter a valid number."
+                )
                 return
             
             if page_number < 0:
-                messagebox.showerror("Error", "Page number must be non-negative")
+                messagebox.showerror(
+                    "Invalid Page Number",
+                    f"The Page Number '{page_number}' is invalid.\n\n"
+                    "Page numbers cannot be negative.\n"
+                    "Please enter a non-negative number."
+                )
                 return
             
+            # Check if process exists
+            if process_id not in self.memory_manager.page_table:
+                messagebox.showerror(
+                    "Process Not Found",
+                    f"Process '{process_id}' does not exist.\n\n"
+                    "Please check the Active Processes list for valid Process IDs.\n"
+                    "You may need to create a process first."
+                )
+                return
+            
+            # Check if page number is valid for the process
+            process_pages = self.memory_manager.page_table[process_id]
+            if page_number >= len(process_pages):
+                messagebox.showerror(
+                    "Invalid Page Number",
+                    f"Page {page_number} does not exist for Process {process_id}.\n\n"
+                    f"Process {process_id} has {len(process_pages)} pages (0 to {len(process_pages)-1}).\n"
+                    "Please enter a valid page number."
+                )
+                return
+            
+            # Attempt to access the page
             success = self.memory_manager.access_page(process_id, page_number)
+            
             if success:
+                # Show success message with details
+                stats = self.memory_manager.get_paging_stats()
+                messagebox.showinfo(
+                    "Page Access Successful",
+                    f"Successfully accessed Page {page_number} of Process {process_id}.\n\n"
+                    f"Current Statistics:\n"
+                    f"• Page Faults: {stats['page_faults']}\n"
+                    f"• Page Hits: {stats['page_hits']}\n"
+                    f"• Fault Rate: {stats['fault_rate']:.1%}\n"
+                    f"• Pages in Memory: {stats['total_pages']}/{stats['max_pages']}"
+                )
                 self.status_var.set(f"Accessed page {page_number} of process {process_id}")
             else:
+                messagebox.showerror(
+                    "Access Failed",
+                    f"Failed to access Page {page_number} of Process {process_id}.\n\n"
+                    "This might be due to:\n"
+                    "• Invalid page number\n"
+                    "• Process not found\n"
+                    "• Memory allocation issues"
+                )
                 self.status_var.set(f"Failed to access page {page_number} of process {process_id}")
             
             self.update_visualization()
-        except ValueError:
-            messagebox.showerror("Error", "Please enter valid numbers")
+            
+        except Exception as e:
+            messagebox.showerror(
+                "Error",
+                f"An unexpected error occurred:\n{str(e)}\n\n"
+                "Please try again or contact support if the problem persists."
+            )
+            self.status_var.set("Error occurred during page access")
 
     def add_access_pattern_graph(self, parent_frame):
         """Add memory access pattern visualization"""
