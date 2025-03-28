@@ -1,12 +1,16 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 import random
+from collections import OrderedDict
+from datetime import datetime
 
 # Constants
 MEMORY_SIZE = 100  # Total memory size
 BLOCK_HEIGHT = 30  # Increased height for better visibility
 BLOCK_WIDTH = 3    # Scaling factor for block visualization
 MAX_MEMORY_SIZE = 1000  # Maximum allowed memory size
+PAGE_SIZE = 10  # Default page size
+MAX_PAGES = 10  # Maximum number of pages in physical memory
 
 class MemoryBlock:
     def __init__(self, start, size, status="free", process_id=None, block_id=None):
@@ -15,6 +19,23 @@ class MemoryBlock:
         self.status = status
         self.process_id = process_id  # Track which process owns this block
         self.block_id = block_id  # Unique identifier for each block
+
+class Page:
+    def __init__(self, page_number, size, process_id=None, is_valid=False):
+        self.page_number = page_number
+        self.size = size
+        self.process_id = process_id
+        self.is_valid = is_valid
+        self.last_access_time = None
+        self.frame_number = None
+
+class Segment:
+    def __init__(self, start, size, process_id=None, name=None):
+        self.start = start
+        self.size = size
+        self.process_id = process_id
+        self.name = name
+        self.pages = []  # List of pages in this segment
 
 class MemoryManager:
     def __init__(self):
@@ -30,6 +51,23 @@ class MemoryManager:
             "worst_fit": {"allocations": 0, "failures": 0},
             "next_fit": {"allocations": 0, "failures": 0}
         }
+        
+        # Paging system
+        self.page_size = PAGE_SIZE
+        self.max_pages = MAX_PAGES
+        self.page_table = {}  # Process ID -> List of Pages
+        self.frame_table = {}  # Frame number -> Page
+        self.page_faults = 0
+        self.page_hits = 0
+        self.replacement_algorithm = "FIFO"  # or "LRU"
+        self.page_queue = []  # For FIFO
+        self.page_access_times = {}  # For LRU
+        self.page_loaded_times = {}  # For FIFO - track when each page was loaded
+        self.page_references = []  # For LRU - track page reference sequence
+        
+        # Segmentation system
+        self.segments = []
+        self.segment_table = {}  # Process ID -> List of Segments
 
     def get_process_color(self, process_id):
         """Get or generate a color for a process"""
@@ -43,6 +81,51 @@ class MemoryManager:
 
     def reset(self):
         """Reset memory to initial state"""
+        # Reset dynamic allocation
+        self.memory = [MemoryBlock(0, MEMORY_SIZE, "free")]
+        self.process_counter = 1
+        self.block_counter = 1
+        self.process_colors.clear()
+        self.last_allocated_index = 0
+        self.algorithm_stats = {
+            "first_fit": {"allocations": 0, "failures": 0},
+            "best_fit": {"allocations": 0, "failures": 0},
+            "worst_fit": {"allocations": 0, "failures": 0},
+            "next_fit": {"allocations": 0, "failures": 0}
+        }
+        
+        # Reset paging system
+        self.page_size = PAGE_SIZE
+        self.max_pages = MAX_PAGES
+        self.page_table.clear()
+        self.frame_table.clear()
+        self.page_queue.clear()
+        self.page_access_times.clear()
+        self.page_loaded_times.clear()
+        self.page_references.clear()
+        self.page_faults = 0
+        self.page_hits = 0
+
+    def reset_paging(self):
+        """Reset paging system"""
+        self.page_table.clear()
+        self.frame_table.clear()
+        self.page_queue.clear()
+        self.page_access_times.clear()
+        self.page_loaded_times.clear()
+        self.page_references.clear()
+        self.page_faults = 0
+        self.page_hits = 0
+
+    def reset_segmentation(self):
+        """Reset segmentation system"""
+        self.segments.clear()
+        self.segment_table.clear()
+        # Also reset paging since segments use paging
+        self.reset_paging()
+
+    def reset_dynamic(self):
+        """Reset dynamic allocation system"""
         self.memory = [MemoryBlock(0, MEMORY_SIZE, "free")]
         self.process_counter = 1
         self.block_counter = 1
@@ -188,6 +271,158 @@ class MemoryManager:
     def get_process_blocks(self, process_id):
         """Get all blocks belonging to a process"""
         return [block for block in self.memory if block.process_id == process_id]
+
+    def set_page_size(self, size):
+        """Set the page size for paging system"""
+        self.page_size = size
+        self.reset_paging()
+
+    def set_replacement_algorithm(self, algorithm):
+        """Set the page replacement algorithm"""
+        self.replacement_algorithm = algorithm
+        self.page_queue = []
+        self.page_access_times = {}
+        self.page_loaded_times = {}
+        self.page_references = []
+
+    def allocate_pages(self, process_id, size):
+        """Allocate pages for a process"""
+        num_pages = (size + self.page_size - 1) // self.page_size
+        pages = []
+        
+        for i in range(num_pages):
+            page = Page(i, min(self.page_size, size - i * self.page_size), process_id)
+            pages.append(page)
+            
+            # Try to allocate a frame
+            if len(self.frame_table) < self.max_pages:
+                frame_num = len(self.frame_table)
+                self.frame_table[frame_num] = page
+                page.frame_number = frame_num
+                page.is_valid = True
+                page.last_access_time = datetime.now()
+                self.page_loaded_times[frame_num] = datetime.now()
+                self.page_queue.append(frame_num)
+            else:
+                # Need page replacement
+                self.handle_page_fault(page)
+        
+        self.page_table[process_id] = pages
+        return pages
+
+    def handle_page_fault(self, new_page):
+        """Handle page fault using selected replacement algorithm"""
+        self.page_faults += 1
+        
+        if self.replacement_algorithm == "FIFO":
+            # If we have free frames
+            if len(self.frame_table) < self.max_pages:
+                frame_num = len(self.frame_table)
+                self.frame_table[frame_num] = new_page
+                new_page.frame_number = frame_num
+                new_page.is_valid = True
+                new_page.last_access_time = datetime.now()
+                self.page_loaded_times[frame_num] = datetime.now()
+                self.page_queue.append(frame_num)
+            else:
+                # Find the oldest page (first in queue)
+                victim_frame = self.page_queue.pop(0)
+                victim_page = self.frame_table[victim_frame]
+                victim_page.is_valid = False
+                
+                # Add new page
+                self.frame_table[victim_frame] = new_page
+                new_page.frame_number = victim_frame
+                new_page.is_valid = True
+                new_page.last_access_time = datetime.now()
+                self.page_loaded_times[victim_frame] = datetime.now()
+                self.page_queue.append(victim_frame)
+            
+        elif self.replacement_algorithm == "LRU":
+            # If we have free frames
+            if len(self.frame_table) < self.max_pages:
+                frame_num = len(self.frame_table)
+                self.frame_table[frame_num] = new_page
+                new_page.frame_number = frame_num
+                new_page.is_valid = True
+                new_page.last_access_time = datetime.now()
+                self.page_access_times[frame_num] = datetime.now()
+                self.page_references.append(frame_num)
+            else:
+                # Find least recently used page
+                lru_frame = min(self.page_access_times.items(), key=lambda x: x[1])[0]
+                victim_page = self.frame_table[lru_frame]
+                victim_page.is_valid = False
+                
+                # Add new page
+                self.frame_table[lru_frame] = new_page
+                new_page.frame_number = lru_frame
+                new_page.is_valid = True
+                new_page.last_access_time = datetime.now()
+                self.page_access_times[lru_frame] = datetime.now()
+                self.page_references.append(lru_frame)
+
+    def access_page(self, process_id, page_number):
+        """Simulate page access"""
+        if process_id in self.page_table:
+            pages = self.page_table[process_id]
+            if 0 <= page_number < len(pages):
+                page = pages[page_number]
+                if page.is_valid:
+                    self.page_hits += 1
+                    if self.replacement_algorithm == "LRU":
+                        # Update access time for LRU
+                        self.page_access_times[page.frame_number] = datetime.now()
+                        # Update reference sequence
+                        if page.frame_number in self.page_references:
+                            self.page_references.remove(page.frame_number)
+                        self.page_references.append(page.frame_number)
+                    return True
+                else:
+                    self.handle_page_fault(page)
+                    return True
+        return False
+
+    def create_segment(self, process_id, size, name=None):
+        """Create a new segment for a process"""
+        segment = Segment(0, size, process_id, name)
+        self.segments.append(segment)
+        
+        if process_id not in self.segment_table:
+            self.segment_table[process_id] = []
+        self.segment_table[process_id].append(segment)
+        
+        # Allocate pages for the segment
+        segment.pages = self.allocate_pages(process_id, size)
+        return segment
+
+    def get_paging_stats(self):
+        """Get paging statistics"""
+        total_accesses = self.page_faults + self.page_hits
+        fault_rate = self.page_faults / total_accesses if total_accesses > 0 else 0
+        
+        # Calculate additional statistics
+        stats = {
+            "page_faults": self.page_faults,
+            "page_hits": self.page_hits,
+            "fault_rate": fault_rate,
+            "total_pages": len(self.frame_table),
+            "max_pages": self.max_pages
+        }
+        
+        if self.replacement_algorithm == "FIFO":
+            stats["queue_length"] = len(self.page_queue)
+            if self.page_loaded_times:
+                oldest_page = min(self.page_loaded_times.items(), key=lambda x: x[1])[0]
+                stats["oldest_page"] = f"Frame {oldest_page}"
+        
+        elif self.replacement_algorithm == "LRU":
+            stats["reference_sequence_length"] = len(self.page_references)
+            if self.page_access_times:
+                lru_page = min(self.page_access_times.items(), key=lambda x: x[1])[0]
+                stats["least_recently_used"] = f"Frame {lru_page}"
+        
+        return stats
 
 class MemoryVisualizer:
     def __init__(self, root):
@@ -356,16 +591,120 @@ class MemoryVisualizer:
             self.stats_labels[algorithm] = ttk.Label(stats_frame, text="")
             self.stats_labels[algorithm].grid(row=i, column=1, padx=5, pady=2)
         
+        # Add memory management mode selection
+        mode_frame = ttk.LabelFrame(control_frame, text="Memory Management Mode", padding=5)
+        mode_frame.grid(row=4, column=0, columnspan=7, pady=5, sticky="ew")
+        
+        self.mode_var = tk.StringVar(value="dynamic")
+        ttk.Radiobutton(mode_frame, text="Dynamic Allocation", variable=self.mode_var, 
+                       value="dynamic", command=self.on_mode_change).pack(side="left", padx=5)
+        ttk.Radiobutton(mode_frame, text="Paging", variable=self.mode_var, 
+                       value="paging", command=self.on_mode_change).pack(side="left", padx=5)
+        ttk.Radiobutton(mode_frame, text="Segmentation", variable=self.mode_var, 
+                       value="segmentation", command=self.on_mode_change).pack(side="left", padx=5)
+        
+        # Add paging controls
+        self.paging_frame = ttk.LabelFrame(control_frame, text="Paging Controls", padding=5)
+        self.paging_frame.grid(row=5, column=0, columnspan=7, pady=5, sticky="ew")
+        
+        ttk.Label(self.paging_frame, text="Page Size:").pack(side="left", padx=5)
+        self.page_size_entry = ttk.Entry(self.paging_frame, width=10)
+        self.page_size_entry.insert(0, str(PAGE_SIZE))
+        self.page_size_entry.pack(side="left", padx=5)
+        
+        ttk.Label(self.paging_frame, text="Max Pages:").pack(side="left", padx=5)
+        self.max_pages_entry = ttk.Entry(self.paging_frame, width=10)
+        self.max_pages_entry.insert(0, str(MAX_PAGES))
+        self.max_pages_entry.pack(side="left", padx=5)
+        
+        ttk.Label(self.paging_frame, text="Replacement:").pack(side="left", padx=5)
+        self.replacement_var = tk.StringVar(value="FIFO")
+        replacement_menu = ttk.OptionMenu(
+            self.paging_frame,
+            self.replacement_var,
+            "FIFO",
+            "FIFO",
+            "LRU"
+        )
+        replacement_menu.pack(side="left", padx=5)
+        
+        self.update_paging_button = ttk.Button(
+            self.paging_frame,
+            text="Update Paging Settings",
+            command=self.update_paging_settings
+        )
+        self.update_paging_button.pack(side="left", padx=5)
+        
+        # Add segmentation controls
+        self.segmentation_frame = ttk.LabelFrame(control_frame, text="Segmentation Controls", padding=5)
+        self.segmentation_frame.grid(row=6, column=0, columnspan=7, pady=5, sticky="ew")
+        
+        ttk.Label(self.segmentation_frame, text="Segment Name:").pack(side="left", padx=5)
+        self.segment_name_entry = ttk.Entry(self.segmentation_frame, width=15)
+        self.segment_name_entry.pack(side="left", padx=5)
+        
+        self.create_segment_button = ttk.Button(
+            self.segmentation_frame,
+            text="Create Segment",
+            command=self.create_segment
+        )
+        self.create_segment_button.pack(side="left", padx=5)
+        
+        # Add page access controls
+        self.page_access_frame = ttk.LabelFrame(control_frame, text="Page Access", padding=5)
+        self.page_access_frame.grid(row=7, column=0, columnspan=7, pady=5, sticky="ew")
+        
+        ttk.Label(self.page_access_frame, text="Process ID:").pack(side="left", padx=5)
+        self.page_process_entry = ttk.Entry(self.page_access_frame, width=10)
+        self.page_process_entry.pack(side="left", padx=5)
+        
+        ttk.Label(self.page_access_frame, text="Page Number:").pack(side="left", padx=5)
+        self.page_number_entry = ttk.Entry(self.page_access_frame, width=10)
+        self.page_number_entry.pack(side="left", padx=5)
+        
+        self.access_page_button = ttk.Button(
+            self.page_access_frame,
+            text="Access Page",
+            command=self.access_page
+        )
+        self.access_page_button.pack(side="left", padx=5)
+        
+        # Add paging statistics display
+        self.paging_stats_label = ttk.Label(root, text="", font=('Helvetica', 10))
+        self.paging_stats_label.pack(pady=5)
+        
+        # Initially hide paging and segmentation controls
+        self.paging_frame.grid_remove()
+        self.segmentation_frame.grid_remove()
+        self.page_access_frame.grid_remove()
+        
         # Initial visualization
         self.update_visualization()
 
     def reset_memory(self):
         """Reset memory to initial state"""
-        self.memory_manager.reset()
+        mode = self.mode_var.get()
+        
+        # Reset based on current mode
+        if mode == "dynamic":
+            self.memory_manager.reset_dynamic()
+        elif mode == "paging":
+            self.memory_manager.reset_paging()
+        elif mode == "segmentation":
+            self.memory_manager.reset_segmentation()
+        else:
+            self.memory_manager.reset()  # Reset everything
+            
+        # Clear input fields
         self.process_entry.delete(0, tk.END)
         self.size_entry.delete(0, tk.END)
+        self.page_process_entry.delete(0, tk.END)
+        self.page_number_entry.delete(0, tk.END)
+        self.segment_name_entry.delete(0, tk.END)
+        
+        # Update visualization and status
         self.update_visualization()
-        self.status_var.set("Memory reset to initial state")
+        self.status_var.set(f"Memory reset to initial state ({mode} mode)")
 
     def on_hover(self, event):
         """Handle mouse hover events"""
@@ -492,6 +831,90 @@ class MemoryVisualizer:
         self.zoom_label.config(text=f"{int(zoom * 100)}%")
         self.update_visualization()
 
+    def on_mode_change(self):
+        """Handle memory management mode change"""
+        mode = self.mode_var.get()
+        
+        # Show/hide relevant controls
+        if mode == "paging":
+            self.paging_frame.grid()
+            self.segmentation_frame.grid_remove()
+            self.page_access_frame.grid()
+        elif mode == "segmentation":
+            self.paging_frame.grid()
+            self.segmentation_frame.grid()
+            self.page_access_frame.grid()
+        else:
+            self.paging_frame.grid_remove()
+            self.segmentation_frame.grid_remove()
+            self.page_access_frame.grid_remove()
+        
+        self.update_visualization()
+
+    def update_paging_settings(self):
+        """Update paging system settings"""
+        try:
+            page_size = int(self.page_size_entry.get())
+            max_pages = int(self.max_pages_entry.get())
+            
+            if page_size <= 0 or max_pages <= 0:
+                messagebox.showerror("Error", "Values must be positive")
+                return
+            
+            self.memory_manager.set_page_size(page_size)
+            self.memory_manager.max_pages = max_pages
+            self.memory_manager.set_replacement_algorithm(self.replacement_var.get())
+            
+            self.status_var.set("Paging settings updated successfully")
+            self.update_visualization()
+        except ValueError:
+            messagebox.showerror("Error", "Please enter valid numbers")
+
+    def create_segment(self):
+        """Create a new segment"""
+        try:
+            size = int(self.size_entry.get())
+            name = self.segment_name_entry.get()
+            process_id = self.process_entry.get()
+            
+            if not process_id:
+                messagebox.showerror("Error", "Please enter a Process ID")
+                return
+            
+            if size <= 0:
+                messagebox.showerror("Error", "Size must be positive")
+                return
+            
+            segment = self.memory_manager.create_segment(process_id, size, name)
+            self.status_var.set(f"Created segment '{name}' for process {process_id}")
+            self.update_visualization()
+        except ValueError:
+            messagebox.showerror("Error", "Please enter valid numbers")
+
+    def access_page(self):
+        """Simulate page access"""
+        try:
+            process_id = self.page_process_entry.get()
+            page_number = int(self.page_number_entry.get())
+            
+            if not process_id:
+                messagebox.showerror("Error", "Please enter a Process ID")
+                return
+            
+            if page_number < 0:
+                messagebox.showerror("Error", "Page number must be non-negative")
+                return
+            
+            success = self.memory_manager.access_page(process_id, page_number)
+            if success:
+                self.status_var.set(f"Accessed page {page_number} of process {process_id}")
+            else:
+                self.status_var.set(f"Failed to access page {page_number} of process {process_id}")
+            
+            self.update_visualization()
+        except ValueError:
+            messagebox.showerror("Error", "Please enter valid numbers")
+
     def update_visualization(self):
         """Update the memory visualization"""
         self.canvas.delete("all")
@@ -507,39 +930,170 @@ class MemoryVisualizer:
             x = 10 + i * scaled_width
             self.canvas.create_line(x, 0, x, self.canvas.winfo_height(), fill="lightgray")
         
-        # Draw each memory block
-        for block in self.memory_manager.memory:
-            # Determine block color and text
-            if block.status == "free":
-                color = "light green"
-                text = f"Free\n{block.size} units"
-            else:
-                color = self.memory_manager.get_process_color(block.process_id)
-                text = f"{block.process_id}\n{block.size} units"
-            
-            # Draw the block with scaled dimensions
-            x1, y1 = 10, y
-            x2, y2 = 10 + block.size * scaled_width, y + scaled_height
-            self.canvas.create_rectangle(x1, y1, x2, y2, fill=color)
-            
-            # Add block information
-            self.canvas.create_text(
-                (x1 + x2) / 2, 
-                (y1 + y2) / 2, 
-                text=text,
-                justify="center"
-            )
-            
-            # Add start address
-            self.canvas.create_text(
-                x1 + 5,
-                y1 + 5,
-                text=f"{block.start}",
-                anchor="nw",
-                font=('Helvetica', 8)
-            )
+        mode = self.mode_var.get()
+        
+        if mode == "dynamic":
+            # Draw memory blocks for dynamic allocation
+            for block in self.memory_manager.memory:
+                # Determine block color and text
+                if block.status == "free":
+                    color = "light green"
+                    text = f"Free\n{block.size} units"
+                else:
+                    color = self.memory_manager.get_process_color(block.process_id)
+                    text = f"{block.process_id}\n{block.size} units"
+                
+                # Draw the block with scaled dimensions
+                x1, y1 = 10, y
+                x2, y2 = 10 + block.size * scaled_width, y + scaled_height
+                self.canvas.create_rectangle(x1, y1, x2, y2, fill=color)
+                
+                # Add block information
+                self.canvas.create_text(
+                    (x1 + x2) / 2, 
+                    (y1 + y2) / 2, 
+                    text=text,
+                    justify="center"
+                )
+                
+                # Add start address
+                self.canvas.create_text(
+                    x1 + 5,
+                    y1 + 5,
+                    text=f"{block.start}",
+                    anchor="nw",
+                    font=('Helvetica', 8)
+                )
+                
+                y += scaled_height + 5
+                
+        elif mode == "paging":
+            # Draw physical memory frames
+            frame_width = MEMORY_SIZE // self.memory_manager.max_pages
+            for i in range(self.memory_manager.max_pages):
+                x1 = 10 + i * frame_width * scaled_width
+                x2 = x1 + frame_width * scaled_width
+                y1 = y
+                y2 = y + scaled_height
+                
+                # Draw frame
+                frame = self.memory_manager.frame_table.get(i)
+                if frame:
+                    color = self.memory_manager.get_process_color(frame.process_id)
+                    text = f"P{frame.process_id} P{frame.page_number}"
+                else:
+                    color = "light green"
+                    text = "Free"
+                
+                self.canvas.create_rectangle(x1, y1, x2, y2, fill=color)
+                self.canvas.create_text(
+                    (x1 + x2) / 2,
+                    (y1 + y2) / 2,
+                    text=text,
+                    justify="center"
+                )
+                
+                # Add frame number
+                self.canvas.create_text(
+                    x1 + 5,
+                    y1 + 5,
+                    text=f"Frame {i}",
+                    anchor="nw",
+                    font=('Helvetica', 8)
+                )
             
             y += scaled_height + 5
+            
+            # Draw page tables
+            for process_id, pages in self.memory_manager.page_table.items():
+                x1 = 10
+                y1 = y
+                y2 = y1 + scaled_height
+                
+                # Draw process header
+                color = self.memory_manager.get_process_color(process_id)
+                self.canvas.create_rectangle(x1, y1, x1 + 200, y2, fill=color)
+                self.canvas.create_text(
+                    x1 + 100,
+                    (y1 + y2) / 2,
+                    text=f"Process {process_id} Page Table",
+                    justify="center"
+                )
+                
+                y += scaled_height + 5
+                
+                # Draw page entries
+                for i, page in enumerate(pages):
+                    x1 = 10 + i * 100
+                    x2 = x1 + 90
+                    y1 = y
+                    y2 = y1 + scaled_height
+                    
+                    # Draw page entry
+                    if page.is_valid:
+                        color = "light blue"
+                        text = f"Page {page.page_number}\nFrame {page.frame_number}"
+                    else:
+                        color = "pink"
+                        text = f"Page {page.page_number}\nNot in Memory"
+                    
+                    self.canvas.create_rectangle(x1, y1, x2, y2, fill=color)
+                    self.canvas.create_text(
+                        (x1 + x2) / 2,
+                        (y1 + y2) / 2,
+                        text=text,
+                        justify="center"
+                    )
+                
+                y += scaled_height + 5
+                
+        elif mode == "segmentation":
+            # Draw segments
+            for segment in self.memory_manager.segments:
+                x1 = 10
+                x2 = 10 + segment.size * scaled_width
+                y1 = y
+                y2 = y + scaled_height
+                
+                # Draw segment
+                color = self.memory_manager.get_process_color(segment.process_id)
+                self.canvas.create_rectangle(x1, y1, x2, y2, fill=color)
+                
+                # Add segment information
+                text = f"Segment: {segment.name}\nProcess: {segment.process_id}\nSize: {segment.size}"
+                self.canvas.create_text(
+                    (x1 + x2) / 2,
+                    (y1 + y2) / 2,
+                    text=text,
+                    justify="center"
+                )
+                
+                y += scaled_height + 5
+                
+                # Draw pages in segment
+                for page in segment.pages:
+                    x1 = 10
+                    x2 = 10 + page.size * scaled_width
+                    y1 = y
+                    y2 = y + scaled_height
+                    
+                    # Draw page
+                    if page.is_valid:
+                        color = "light blue"
+                        text = f"Page {page.page_number}\nFrame {page.frame_number}"
+                    else:
+                        color = "pink"
+                        text = f"Page {page.page_number}\nNot in Memory"
+                    
+                    self.canvas.create_rectangle(x1, y1, x2, y2, fill=color)
+                    self.canvas.create_text(
+                        (x1 + x2) / 2,
+                        (y1 + y2) / 2,
+                        text=text,
+                        justify="center"
+                    )
+                    
+                    y += scaled_height + 5
         
         # Update canvas scroll region
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -578,6 +1132,30 @@ class MemoryVisualizer:
                      f"Failures: {stat['failures']} | "
                      f"Success Rate: {success_rate:.1%}"
             )
+        
+        # Update paging statistics
+        if mode in ["paging", "segmentation"]:
+            stats = self.memory_manager.get_paging_stats()
+            stats_text = (
+                f"Page Faults: {stats['page_faults']} | "
+                f"Page Hits: {stats['page_hits']} | "
+                f"Fault Rate: {stats['fault_rate']:.1%} | "
+                f"Pages in Memory: {stats['total_pages']}/{stats['max_pages']}"
+            )
+            
+            # Add algorithm-specific statistics
+            if self.memory_manager.replacement_algorithm == "FIFO":
+                stats_text += f" | Queue Length: {stats['queue_length']}"
+                if 'oldest_page' in stats:
+                    stats_text += f" | Oldest Page: {stats['oldest_page']}"
+            elif self.memory_manager.replacement_algorithm == "LRU":
+                stats_text += f" | Reference Sequence Length: {stats['reference_sequence_length']}"
+                if 'least_recently_used' in stats:
+                    stats_text += f" | LRU Page: {stats['least_recently_used']}"
+            
+            self.paging_stats_label.config(text=stats_text)
+        else:
+            self.paging_stats_label.config(text="")
 
     def calculate_fragmentation(self):
         """Calculate external fragmentation percentage"""
