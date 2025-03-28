@@ -6,6 +6,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from collections import deque
 import time
 import math
+import numpy as np
 
 # Constants
 MEMORY_SIZE = 100  # Total memory size
@@ -13,6 +14,9 @@ BLOCK_HEIGHT = 30  # Increased height for better visibility
 BLOCK_WIDTH = 3    # Scaling factor for block visualization
 MAX_MEMORY_SIZE = 1000  # Maximum allowed memory size
 PAGE_SIZE = 10  # Size of each page for paging visualization
+CACHE_SIZE = 20  # Cache memory size
+CACHE_LINES = 4  # Number of cache lines
+VIRTUAL_MEMORY_SIZE = 200  # Virtual memory size
 
 class BuddyBlock:
     def __init__(self, start, size, status="free", process_id=None):
@@ -47,6 +51,93 @@ class MemoryBlock:
         self.last_access_time = time.time()
         self.access_count = 0
         self.is_leaked = False
+        self.access_pattern = []  # Track access patterns
+        self.virtual_address = None  # For virtual memory mapping
+
+class CacheLine:
+    def __init__(self, tag, data, valid=True, dirty=False):
+        self.tag = tag
+        self.data = data
+        self.valid = valid
+        self.dirty = dirty
+        self.last_access = time.time()
+        self.access_count = 0
+
+class Cache:
+    def __init__(self):
+        self.lines = [CacheLine(None, None) for _ in range(CACHE_LINES)]
+        self.hits = 0
+        self.misses = 0
+        self.replacements = 0
+        self.write_backs = 0
+
+    def access(self, address, data=None, is_write=False):
+        tag = address // CACHE_SIZE
+        offset = address % CACHE_SIZE
+        
+        # Check for hit
+        for line in self.lines:
+            if line.valid and line.tag == tag:
+                line.last_access = time.time()
+                line.access_count += 1
+                self.hits += 1
+                if is_write:
+                    line.dirty = True
+                    line.data = data
+                return True, line.data
+        
+        # Cache miss
+        self.misses += 1
+        
+        # Find victim line (LRU)
+        victim = min(self.lines, key=lambda x: x.last_access)
+        
+        # Write back if dirty
+        if victim.dirty:
+            self.write_backs += 1
+        
+        # Replace line
+        victim.tag = tag
+        victim.data = data if is_write else None
+        victim.valid = True
+        victim.dirty = is_write
+        victim.last_access = time.time()
+        victim.access_count = 1
+        self.replacements += 1
+        
+        return False, None
+
+class VirtualMemory:
+    def __init__(self):
+        self.pages = {}  # Virtual page number -> Physical frame number
+        self.page_faults = 0
+        self.page_hits = 0
+        self.disk_accesses = 0
+        self.page_table = {}
+        self.free_frames = list(range(MEMORY_SIZE // PAGE_SIZE))
+        self.access_history = []
+
+    def access(self, virtual_address):
+        page_number = virtual_address // PAGE_SIZE
+        offset = virtual_address % PAGE_SIZE
+        
+        if page_number in self.pages:
+            self.page_hits += 1
+            return True, self.pages[page_number] * PAGE_SIZE + offset
+        
+        # Page fault
+        self.page_faults += 1
+        self.disk_accesses += 1
+        
+        if self.free_frames:
+            frame = self.free_frames.pop(0)
+        else:
+            # Page replacement (FIFO)
+            frame = self.pages.pop(next(iter(self.pages)))
+        
+        self.pages[page_number] = frame
+        self.access_history.append((time.time(), page_number))
+        return False, frame * PAGE_SIZE + offset
 
 class MemoryManager:
     def __init__(self):
@@ -62,6 +153,16 @@ class MemoryManager:
         self.leak_threshold = 300  # 5 minutes in seconds
         self.leak_check_interval = 60  # 1 minute in seconds
         self.last_leak_check = time.time()
+        self.cache = Cache()
+        self.virtual_memory = VirtualMemory()
+        self.performance_metrics = {
+            'allocation_time': [],
+            'deallocation_time': [],
+            'access_time': [],
+            'fragmentation_history': [],
+            'cache_hit_rate': [],
+            'page_fault_rate': []
+        }
 
     def get_process_color(self, process_id):
         if process_id not in self.process_colors:
@@ -332,15 +433,30 @@ class MemoryManager:
                         block.is_leaked = True
             self.last_leak_check = current_time
 
-    def access_memory(self, process_id):
-        """Record memory access for leak detection"""
+    def access_memory(self, process_id, address, is_write=False):
+        """Access memory with cache and virtual memory"""
+        start_time = time.time()
+        
+        # Virtual memory translation
+        page_fault, physical_address = self.virtual_memory.access(address)
+        
+        # Cache access
+        cache_hit, data = self.cache.access(physical_address, is_write=is_write)
+        
+        # Update performance metrics
+        access_time = time.time() - start_time
+        self.performance_metrics['access_time'].append(access_time)
+        
+        # Update access pattern
         for block in self.memory:
             if block.process_id == process_id:
+                block.access_pattern.append((time.time(), address))
                 block.last_access_time = time.time()
                 block.access_count += 1
                 block.is_leaked = False
-                return True
-        return False
+                return True, data
+        
+        return False, None
 
     def get_page_table(self, process_id):
         """Get page table for a process"""
@@ -364,34 +480,44 @@ class MemoryManager:
         self.page_table[process_id] = pages
         return pages
 
+    def get_performance_metrics(self):
+        """Calculate current performance metrics"""
+        current_time = time.time() - self.start_time
+        
+        # Calculate cache hit rate
+        total_cache_accesses = self.cache.hits + self.cache.misses
+        cache_hit_rate = (self.cache.hits / total_cache_accesses * 100) if total_cache_accesses > 0 else 0
+        
+        # Calculate page fault rate
+        total_page_accesses = self.virtual_memory.page_hits + self.virtual_memory.page_faults
+        page_fault_rate = (self.virtual_memory.page_faults / total_page_accesses * 100) if total_page_accesses > 0 else 0
+        
+        # Calculate average access time
+        avg_access_time = np.mean(self.performance_metrics['access_time']) if self.performance_metrics['access_time'] else 0
+        
+        return {
+            'cache_hit_rate': cache_hit_rate,
+            'page_fault_rate': page_fault_rate,
+            'avg_access_time': avg_access_time,
+            'total_memory_usage': sum(block.size for block in self.memory if block.status == "allocated"),
+            'fragmentation': self.calculate_fragmentation()
+        }
+
 class MemoryVisualizer:
     def __init__(self, root):
         self.root = root
         self.root.title("Dynamic Memory Management Visualizer")
         self.memory_manager = MemoryManager()
 
-        # Configure main window
-        self.root.geometry("800x600")
+        # Configure main window with larger size
+        self.root.geometry("1000x1000")
         
         # Create main frames
         control_frame = ttk.LabelFrame(root, text="Controls", padding=10)
         control_frame.pack(fill="x", padx=10, pady=5)
         
-        # Create canvas with scrollbar
-        canvas_frame = ttk.Frame(root)
-        canvas_frame.pack(fill="both", expand=True, padx=10, pady=5)
-        
-        self.canvas = tk.Canvas(
-            canvas_frame,
-            bg="white",
-            highlightthickness=1,
-            highlightbackground="black"
-        )
-        scrollbar = ttk.Scrollbar(canvas_frame, orient="vertical", command=self.canvas.yview)
-        self.canvas.configure(yscrollcommand=scrollbar.set)
-        
-        scrollbar.pack(side="right", fill="y")
-        self.canvas.pack(side="left", fill="both", expand=True)
+        visualization_frame = ttk.Frame(root)
+        visualization_frame.pack(fill="both", expand=True, padx=10, pady=5)
         
         # Control widgets
         ttk.Label(control_frame, text="Memory Size:").grid(row=0, column=0, padx=5)
@@ -416,13 +542,6 @@ class MemoryVisualizer:
         )
         self.deallocate_button.grid(row=0, column=5, padx=5)
         
-        self.reset_button = ttk.Button(
-            control_frame,
-            text="Reset",
-            command=self.reset_memory
-        )
-        self.reset_button.grid(row=0, column=6, padx=5)
-        
         # Algorithm selection
         ttk.Label(control_frame, text="Algorithm:").grid(row=1, column=0, padx=5)
         self.algorithm_var = tk.StringVar(value="first_fit")
@@ -436,150 +555,92 @@ class MemoryVisualizer:
         )
         algorithm_menu.grid(row=1, column=1, columnspan=2, padx=5, sticky="ew")
         
-        # Legend frame
-        legend_frame = ttk.LabelFrame(control_frame, text="Legend", padding=5)
-        legend_frame.grid(row=1, column=3, columnspan=4, padx=5, sticky="ew")
+        # Add virtual memory visualization
+        virtual_frame = ttk.LabelFrame(root, text="Virtual Memory", padding=5)
+        virtual_frame.pack(fill="x", padx=10, pady=5)
         
-        # Add legend items
-        ttk.Label(legend_frame, text="Free Memory", background="light green").pack(side="left", padx=5)
-        ttk.Label(legend_frame, text="Allocated Memory", background="salmon").pack(side="left", padx=5)
-        
-        # Statistics display
-        self.stats_label = ttk.Label(root, text="", font=('Helvetica', 10))
-        self.stats_label.pack(pady=5)
-        
-        # Status bar
-        self.status_var = tk.StringVar()
-        self.status_bar = ttk.Label(root, textvariable=self.status_var, relief="sunken")
-        self.status_bar.pack(fill="x", padx=10, pady=2)
-        
-        # Bind hover events
-        self.canvas.bind("<Motion>", self.on_hover)
-        
-        # Add compaction button
-        self.compact_button = ttk.Button(
-            control_frame,
-            text="Compact Memory",
-            command=self.compact_memory
-        )
-        self.compact_button.grid(row=0, column=7, padx=5)
-        
-        # Add process queue display
-        queue_frame = ttk.LabelFrame(root, text="Process Queue", padding=5)
-        queue_frame.pack(fill="x", padx=10, pady=5)
-        
-        self.queue_text = tk.Text(queue_frame, height=3, width=50)
-        self.queue_text.pack(fill="x", padx=5, pady=5)
-        
-        # Add statistics graph
-        self.fig, self.ax = plt.subplots(figsize=(6, 2))
-        self.canvas = FigureCanvasTkAgg(self.fig, master=root)
-        self.canvas.get_tk_widget().pack(fill="x", padx=10, pady=5)
-        
-        # Add memory protection controls
-        protection_frame = ttk.LabelFrame(control_frame, text="Memory Protection", padding=5)
-        protection_frame.grid(row=2, column=0, columnspan=8, padx=5, sticky="ew")
-        
-        ttk.Label(protection_frame, text="Process:").pack(side="left", padx=5)
-        self.protection_process = ttk.Entry(protection_frame, width=10)
-        self.protection_process.pack(side="left", padx=5)
-        
-        self.read_var = tk.BooleanVar(value=True)
-        self.write_var = tk.BooleanVar(value=True)
-        self.execute_var = tk.BooleanVar(value=True)
-        
-        ttk.Checkbutton(protection_frame, text="Read", variable=self.read_var).pack(side="left", padx=5)
-        ttk.Checkbutton(protection_frame, text="Write", variable=self.write_var).pack(side="left", padx=5)
-        ttk.Checkbutton(protection_frame, text="Execute", variable=self.execute_var).pack(side="left", padx=5)
-        
-        ttk.Button(
-            protection_frame,
-            text="Set Protection",
-            command=self.set_protection
-        ).pack(side="left", padx=5)
-        
-        # Add buddy system visualization
-        buddy_frame = ttk.LabelFrame(root, text="Buddy System Visualization", padding=5)
-        buddy_frame.pack(fill="x", padx=10, pady=5)
-        
-        self.buddy_canvas = tk.Canvas(
-            buddy_frame,
+        self.virtual_canvas = tk.Canvas(
+            virtual_frame,
             bg="white",
             height=100,
             highlightthickness=1,
             highlightbackground="black"
         )
-        self.buddy_canvas.pack(fill="x", padx=5, pady=5)
+        self.virtual_canvas.pack(fill="x", padx=5, pady=5)
         
-        # Add paging visualization
-        paging_frame = ttk.LabelFrame(root, text="Paging Visualization", padding=5)
-        paging_frame.pack(fill="x", padx=10, pady=5)
+        # Add cache visualization
+        cache_frame = ttk.LabelFrame(root, text="Cache Memory", padding=5)
+        cache_frame.pack(fill="x", padx=10, pady=5)
         
-        self.paging_text = tk.Text(paging_frame, height=4, width=50)
-        self.paging_text.pack(fill="x", padx=5, pady=5)
+        self.cache_canvas = tk.Canvas(
+            cache_frame,
+            bg="white",
+            height=100,
+            highlightthickness=1,
+            highlightbackground="black"
+        )
+        self.cache_canvas.pack(fill="x", padx=5, pady=5)
         
-        # Add leak detection controls
-        leak_frame = ttk.LabelFrame(control_frame, text="Memory Leak Detection", padding=5)
-        leak_frame.grid(row=3, column=0, columnspan=8, padx=5, sticky="ew")
+        # Add performance metrics dashboard with scrollbar
+        metrics_frame = ttk.LabelFrame(root, text="Performance Metrics", padding=5)
+        metrics_frame.pack(fill="x", padx=10, pady=5)
         
-        ttk.Label(leak_frame, text="Leak Threshold (seconds):").pack(side="left", padx=5)
-        self.leak_threshold = ttk.Entry(leak_frame, width=10)
-        self.leak_threshold.insert(0, "300")
-        self.leak_threshold.pack(side="left", padx=5)
+        # Create a frame for metrics text and scrollbar
+        metrics_text_frame = ttk.Frame(metrics_frame)
+        metrics_text_frame.pack(fill="x", padx=5, pady=5)
+        
+        # Add scrollbar for metrics
+        metrics_scrollbar = ttk.Scrollbar(metrics_text_frame)
+        metrics_scrollbar.pack(side="right", fill="y")
+        
+        self.metrics_text = tk.Text(metrics_text_frame, height=6, width=100, yscrollcommand=metrics_scrollbar.set)
+        self.metrics_text.pack(side="left", fill="x", expand=True)
+        metrics_scrollbar.config(command=self.metrics_text.yview)
+        
+        # Add memory access controls
+        access_frame = ttk.LabelFrame(control_frame, text="Memory Access", padding=5)
+        access_frame.grid(row=4, column=0, columnspan=8, padx=5, sticky="ew")
+        
+        ttk.Label(access_frame, text="Address:").pack(side="left", padx=5)
+        self.address_entry = ttk.Entry(access_frame, width=10)
+        self.address_entry.pack(side="left", padx=5)
         
         ttk.Button(
-            leak_frame,
-            text="Check for Leaks",
-            command=self.check_leaks
+            access_frame,
+            text="Read",
+            command=lambda: self.access_memory(False)
         ).pack(side="left", padx=5)
         
-        # Add help button
-        help_button = ttk.Button(
-            control_frame,
-            text="Help",
-            command=self.show_help
+        ttk.Button(
+            access_frame,
+            text="Write",
+            command=lambda: self.access_memory(True)
+        ).pack(side="left", padx=5)
+        
+        # Visualization canvas with scrollbar
+        canvas_frame = ttk.Frame(visualization_frame)
+        canvas_frame.pack(fill="both", expand=True)
+        
+        self.canvas = tk.Canvas(
+            canvas_frame,
+            bg="white",
+            highlightthickness=1,
+            highlightbackground="black"
         )
-        help_button.grid(row=0, column=8, padx=5)
+        self.canvas.pack(side="left", fill="both", expand=True)
         
-        # Add tooltips
-        self.create_tooltips()
+        scrollbar = ttk.Scrollbar(canvas_frame, orient="vertical", command=self.canvas.yview)
+        scrollbar.pack(side="right", fill="y")
         
-        # Start periodic leak checking
-        self.root.after(60000, self.periodic_leak_check)
+        self.canvas.configure(yscrollcommand=scrollbar.set)
+        
+        # Status bar
+        self.status_var = tk.StringVar()
+        status_bar = ttk.Label(root, textvariable=self.status_var, relief="sunken")
+        status_bar.pack(fill="x", padx=10, pady=5)
         
         # Initial visualization
         self.update_visualization()
-
-    def reset_memory(self):
-        """Reset memory to initial state"""
-        self.memory_manager.reset()
-        self.process_entry.delete(0, tk.END)
-        self.size_entry.delete(0, tk.END)
-        self.update_visualization()
-        self.status_var.set("Memory reset to initial state")
-
-    def on_hover(self, event):
-        """Handle mouse hover events"""
-        # Convert canvas coordinates to memory block coordinates
-        canvas_x = self.canvas.canvasx(event.x)
-        canvas_y = self.canvas.canvasy(event.y)
-        
-        # Find the block under the cursor
-        y = 10
-        for block in self.memory_manager.memory:
-            x1, y1 = 10, y
-            x2, y2 = 10 + block.size * BLOCK_WIDTH, y + BLOCK_HEIGHT
-            
-            if (x1 <= canvas_x <= x2 and y1 <= canvas_y <= y2):
-                details = f"Start: {block.start}, Size: {block.size}, Status: {block.status}"
-                if block.process_id:
-                    details += f", Process: {block.process_id}"
-                self.status_var.set(details)
-                return
-                
-            y += BLOCK_HEIGHT + 5
-        
-        self.status_var.set("Ready")
 
     def allocate(self):
         """Handle memory allocation"""
@@ -588,128 +649,115 @@ class MemoryVisualizer:
             if size <= 0:
                 messagebox.showerror("Error", "Size must be positive")
                 return
-            if size > MAX_MEMORY_SIZE:
-                messagebox.showerror("Error", f"Size cannot exceed {MAX_MEMORY_SIZE} units")
-                return
             
             success, process_id = self.memory_manager.allocate_memory(size)
             if success:
                 self.process_entry.delete(0, tk.END)
                 self.process_entry.insert(0, process_id)
-                self.status_var.set(f"Successfully allocated {size} units to {process_id}")
+                messagebox.showinfo("Success", f"Allocated {size} units to {process_id}")
             else:
-                self.status_var.set("Failed to allocate memory - not enough contiguous space")
                 messagebox.showerror("Error", "Not enough contiguous memory")
             
             self.update_visualization()
         except ValueError:
-            self.status_var.set("Error: Please enter a valid size")
             messagebox.showerror("Error", "Please enter a valid size")
 
     def deallocate(self):
         """Handle memory deallocation"""
         process_id = self.process_entry.get()
         if not process_id:
-            self.status_var.set("Error: Please enter a Process ID")
             messagebox.showerror("Error", "Please enter a Process ID")
             return
         
         if self.memory_manager.deallocate_memory(process_id):
-            self.status_var.set(f"Successfully deallocated memory for {process_id}")
+            messagebox.showinfo("Success", f"Deallocated memory for {process_id}")
             self.process_entry.delete(0, tk.END)
         else:
-            self.status_var.set(f"Failed to deallocate - no blocks found for {process_id}")
             messagebox.showerror("Error", f"No allocated blocks found for {process_id}")
         
         self.update_visualization()
 
-    def compact_memory(self):
-        """Handle memory compaction"""
-        if self.memory_manager.compact_memory():
-            self.status_var.set("Memory compacted successfully")
+    def access_memory(self, is_write):
+        """Handle memory access"""
+        try:
+            address = int(self.address_entry.get())
+            process_id = self.process_entry.get()
+            
+            if not process_id:
+                messagebox.showerror("Error", "Please enter a Process ID")
+                return
+            
+            success, data = self.memory_manager.access_memory(process_id, address, is_write)
+            
+            if success:
+                self.status_var.set(f"Memory {'write' if is_write else 'read'} successful")
+            else:
+                self.status_var.set("Memory access failed")
+            
             self.update_visualization()
-        else:
-            self.status_var.set("Compaction failed")
+        except ValueError:
+            messagebox.showerror("Error", "Please enter a valid address")
 
-    def set_protection(self):
-        """Set memory protection bits for a process"""
-        process_id = self.protection_process.get()
-        if not process_id:
-            messagebox.showerror("Error", "Please enter a Process ID")
-            return
+    def update_virtual_memory_visualization(self):
+        """Update virtual memory visualization"""
+        self.virtual_canvas.delete("all")
         
-        protection = ""
-        if self.read_var.get(): protection += "R"
-        if self.write_var.get(): protection += "W"
-        if self.execute_var.get(): protection += "X"
-        
-        for block in self.memory_manager.memory:
-            if block.process_id == process_id:
-                block.protection_bits = protection
-                self.status_var.set(f"Protection set to {protection} for {process_id}")
-                self.update_visualization()
-                return
-        
-        messagebox.showerror("Error", f"No blocks found for process {process_id}")
-
-    def update_queue_display(self):
-        """Update the process queue display"""
-        self.queue_text.delete("1.0", tk.END)
-        for process in self.memory_manager.process_queue:
-            self.queue_text.insert(tk.END, 
-                f"Process {process.pid} (Size: {process.size}, Priority: {process.priority}, Wait: {process.wait_time}s)\n")
-
-    def update_statistics_graph(self):
-        """Update the statistics graph"""
-        self.ax.clear()
-        if self.memory_manager.allocation_history:
-            times = [entry['time'] for entry in self.memory_manager.allocation_history]
-            fragmentation = [entry['fragmentation'] for entry in self.memory_manager.allocation_history]
-            self.ax.plot(times, fragmentation, 'b-')
-            self.ax.set_title("Memory Fragmentation Over Time")
-            self.ax.set_xlabel("Time (s)")
-            self.ax.set_ylabel("Fragmentation (%)")
-        self.canvas.draw()
-
-    def update_buddy_visualization(self):
-        """Update buddy system visualization"""
-        self.buddy_canvas.delete("all")
-        
-        def draw_buddy_block(block, x, y, width, height):
-            if not block:
-                return
+        # Draw virtual memory space
+        for page_num, frame_num in self.memory_manager.virtual_memory.pages.items():
+            x1 = 10 + (page_num * 20)
+            y1 = 10
+            x2 = x1 + 15
+            y2 = 90
             
-            # Draw the block
-            color = "light green" if block.status == "free" else self.memory_manager.get_process_color(block.process_id)
-            self.buddy_canvas.create_rectangle(x, y, x + width, y + height, fill=color)
+            color = "light blue" if frame_num in self.memory_manager.virtual_memory.free_frames else "salmon"
+            self.virtual_canvas.create_rectangle(x1, y1, x2, y2, fill=color)
             
-            # Add block information
-            text = f"{block.size}\n{block.process_id if block.process_id else 'Free'}"
-            self.buddy_canvas.create_text(x + width/2, y + height/2, text=text, justify="center")
-            
-            # Draw children if split
-            if block.split:
-                draw_buddy_block(block.left, x, y + height, width/2, height/2)
-                draw_buddy_block(block.right, x + width/2, y + height, width/2, height/2)
-        
-        draw_buddy_block(self.memory_manager.buddy_root, 10, 10, 780, 80)
+            self.virtual_canvas.create_text(
+                (x1 + x2) / 2,
+                (y1 + y2) / 2,
+                text=f"P{page_num}\nF{frame_num}",
+                justify="center"
+            )
 
-    def update_paging_visualization(self):
-        """Update paging visualization"""
-        self.paging_text.delete("1.0", tk.END)
+    def update_cache_visualization(self):
+        """Update cache visualization"""
+        self.cache_canvas.delete("all")
         
-        for process_id, pages in self.memory_manager.page_table.items():
-            self.paging_text.insert(tk.END, f"Process {process_id} Page Table:\n")
-            for page in pages:
-                status = "Valid" if page['valid'] else "Invalid"
-                modified = "M" if page['modified'] else "-"
-                accessed = "A" if page['accessed'] else "-"
-                self.paging_text.insert(tk.END, 
-                    f"Page {page['page_number']} -> Frame {page['frame_number']} [{status}] [{modified}{accessed}]\n")
-            self.paging_text.insert(tk.END, "\n")
+        # Draw cache lines
+        for i, line in enumerate(self.memory_manager.cache.lines):
+            x1 = 10 + (i * 100)
+            y1 = 10
+            x2 = x1 + 90
+            y2 = 90
+            
+            color = "light green" if line.valid else "gray"
+            self.cache_canvas.create_rectangle(x1, y1, x2, y2, fill=color)
+            
+            status = "V" if line.valid else "I"
+            status += "D" if line.dirty else "-"
+            text = f"Tag: {line.tag}\n{status}\nAccess: {line.access_count}"
+            
+            self.cache_canvas.create_text(
+                (x1 + x2) / 2,
+                (y1 + y2) / 2,
+                text=text,
+                justify="center"
+            )
+
+    def update_performance_metrics(self):
+        """Update performance metrics display"""
+        metrics = self.memory_manager.get_performance_metrics()
+        
+        self.metrics_text.delete("1.0", tk.END)
+        self.metrics_text.insert(tk.END, "Performance Metrics:\n\n")
+        self.metrics_text.insert(tk.END, f"Cache Hit Rate: {metrics['cache_hit_rate']:.1f}%\n")
+        self.metrics_text.insert(tk.END, f"Page Fault Rate: {metrics['page_fault_rate']:.1f}%\n")
+        self.metrics_text.insert(tk.END, f"Average Access Time: {metrics['avg_access_time']*1000:.2f}ms\n")
+        self.metrics_text.insert(tk.END, f"Memory Usage: {metrics['total_memory_usage']}/{MEMORY_SIZE} units\n")
+        self.metrics_text.insert(tk.END, f"Fragmentation: {metrics['fragmentation']:.1f}%")
 
     def update_visualization(self):
-        """Update the memory visualization"""
+        """Update all visualizations"""
         self.canvas.delete("all")
         y = 10
         
@@ -750,136 +798,10 @@ class MemoryVisualizer:
         # Update canvas scroll region
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
         
-        # Update statistics
-        total_memory = MEMORY_SIZE
-        used_memory = sum(
-            block.size for block in self.memory_manager.memory 
-            if block.status == "allocated"
-        )
-        free_memory = total_memory - used_memory
-        fragmentation = self.memory_manager.calculate_fragmentation()
-        
-        # Update additional displays
-        self.update_queue_display()
-        self.update_statistics_graph()
-        self.update_buddy_visualization()
-        self.update_paging_visualization()
-        
-        # Update leak detection status
-        leaked_blocks = [block for block in self.memory_manager.memory if block.is_leaked]
-        if leaked_blocks:
-            self.status_var.set("WARNING: Memory leaks detected!")
-        
-        # Add internal fragmentation to statistics
-        internal_frag = self.memory_manager.calculate_internal_fragmentation()
-        stats_text = (
-            f"Total Memory: {total_memory} units | "
-            f"Used: {used_memory} units | "
-            f"Free: {free_memory} units | "
-            f"External Fragmentation: {fragmentation:.1f}% | "
-            f"Internal Fragmentation: {internal_frag} bytes"
-        )
-        self.stats_label.config(text=stats_text)
-
-    def create_tooltips(self):
-        """Create tooltips for UI elements"""
-        tooltips = {
-            self.allocate_button: "Allocate memory for a new process",
-            self.deallocate_button: "Free memory allocated to a process",
-            self.reset_button: "Reset memory to initial state",
-            self.compact_button: "Compact memory to reduce fragmentation",
-            self.leak_threshold: "Time threshold for memory leak detection (in seconds)"
-        }
-        
-        for widget, text in tooltips.items():
-            self.create_tooltip(widget, text)
-
-    def create_tooltip(self, widget, text):
-        """Create a tooltip for a widget"""
-        def show_tooltip(event):
-            tooltip = tk.Toplevel()
-            tooltip.wm_overrideredirect(True)
-            tooltip.wm_geometry(f"+{event.x_root+10}+{event.y_root+10}")
-            
-            label = ttk.Label(tooltip, text=text, background="#ffffe0", relief="solid", borderwidth=1)
-            label.pack()
-            
-            def hide_tooltip():
-                tooltip.destroy()
-            
-            widget.tooltip = tooltip
-            widget.bind('<Leave>', lambda e: hide_tooltip())
-        
-        widget.bind('<Enter>', show_tooltip)
-
-    def show_help(self):
-        """Show help window with explanations"""
-        help_window = tk.Toplevel(self.root)
-        help_window.title("Memory Management Help")
-        help_window.geometry("600x400")
-        
-        help_text = """
-Memory Management Visualizer Help
-
-1. Memory Allocation Algorithms:
-   - First Fit: Allocates the first block that fits
-   - Best Fit: Allocates the smallest block that fits
-   - Worst Fit: Allocates the largest block that fits
-   - Buddy System: Uses power-of-2 sized blocks
-
-2. Memory Protection:
-   - R: Read permission
-   - W: Write permission
-   - X: Execute permission
-
-3. Memory Leak Detection:
-   - Monitors memory blocks not accessed for threshold time
-   - Helps identify potential memory leaks
-
-4. Paging:
-   - Visualizes memory paging
-   - Shows page tables and frame allocation
-
-5. Memory Compaction:
-   - Reduces external fragmentation
-   - Moves allocated blocks together
-
-6. Process Queue:
-   - Shows pending memory requests
-   - Priority-based scheduling
-"""
-        
-        text_widget = tk.Text(help_window, wrap=tk.WORD, padx=10, pady=10)
-        text_widget.pack(fill="both", expand=True)
-        text_widget.insert("1.0", help_text)
-        text_widget.config(state="disabled")
-
-    def check_leaks(self):
-        """Check for memory leaks"""
-        try:
-            threshold = int(self.leak_threshold.get())
-            self.memory_manager.leak_threshold = threshold
-        except ValueError:
-            messagebox.showerror("Error", "Please enter a valid threshold value")
-            return
-        
-        self.memory_manager.check_memory_leaks()
-        leaked_blocks = [block for block in self.memory_manager.memory if block.is_leaked]
-        
-        if leaked_blocks:
-            message = "Potential memory leaks detected:\n"
-            for block in leaked_blocks:
-                message += f"Process {block.process_id}: {block.size} units\n"
-            messagebox.showwarning("Memory Leak Warning", message)
-        else:
-            messagebox.showinfo("Memory Leak Check", "No memory leaks detected")
-        
-        self.update_visualization()
-
-    def periodic_leak_check(self):
-        """Periodically check for memory leaks"""
-        self.check_leaks()
-        self.root.after(60000, self.periodic_leak_check)
+        # Update additional visualizations
+        self.update_virtual_memory_visualization()
+        self.update_cache_visualization()
+        self.update_performance_metrics()
 
 if __name__ == "__main__":
     root = tk.Tk()
