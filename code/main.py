@@ -70,6 +70,39 @@ class MemoryManager:
         # Segmentation system
         self.segments = []
         self.segment_table = {}  # Process ID -> List of Segments
+        
+        # Performance metrics
+        self.performance_metrics = {
+            "memory_usage": [],  # Track memory usage over time
+            "peak_memory": 0,    # Peak memory usage
+            "allocation_times": [],  # Track allocation operation times
+            "deallocation_times": [],  # Track deallocation operation times
+            "page_fault_history": [],  # Track page fault occurrences
+            "page_hit_history": [],    # Track page hit occurrences
+            "fragmentation_history": [],  # Track fragmentation levels
+            "algorithm_performance": {  # Track performance of each algorithm
+                "first_fit": {"avg_time": 0, "success_rate": 0},
+                "best_fit": {"avg_time": 0, "success_rate": 0},
+                "worst_fit": {"avg_time": 0, "success_rate": 0},
+                "next_fit": {"avg_time": 0, "success_rate": 0}
+            }
+        }
+        
+        # Add fragmentation analysis metrics
+        self.fragmentation_metrics = {
+            "external_fragmentation": [],  # Track external fragmentation over time
+            "internal_fragmentation": [],  # Track internal fragmentation over time
+            "total_wasted_space": 0,      # Total wasted space due to fragmentation
+            "fragmentation_history": []    # Historical fragmentation data
+        }
+        
+        # Add process scheduling metrics
+        self.scheduling_metrics = {
+            "process_queue": [],           # Processes waiting for memory
+            "waiting_times": {},           # Track waiting times for each process
+            "cpu_utilization": [],         # Track CPU utilization
+            "scheduling_history": []       # Historical scheduling data
+        }
 
     def get_process_color(self, process_id):
         """Get or generate a color for a process"""
@@ -141,7 +174,8 @@ class MemoryManager:
         }
 
     def allocate_memory(self, size):
-        """Allocate memory with current algorithm"""
+        """Allocate memory with current algorithm and track performance"""
+        start_time = datetime.now()
         process_id = f"P{self.process_counter}"
         self.process_counter += 1
         
@@ -154,6 +188,10 @@ class MemoryManager:
             success = self.worst_fit(size, process_id)
         elif self.algorithm == "next_fit":
             success = self.next_fit(size, process_id)
+        
+        # Track allocation time
+        allocation_time = (datetime.now() - start_time).total_seconds()
+        self.performance_metrics["allocation_times"].append(allocation_time)
         
         # Update statistics
         if success:
@@ -231,26 +269,30 @@ class MemoryManager:
         self.block_counter += 1
 
     def deallocate_memory(self, process_id, block_id=None):
-        """Deallocate memory blocks belonging to a process"""
+        """Deallocate memory blocks and track performance"""
+        start_time = datetime.now()
         deallocated = False
+        
         for block in self.memory:
             if block.process_id == process_id:
                 if block_id is None:
-                    # If no block_id specified, deallocate all blocks of the process
                     block.status = "free"
                     block.process_id = None
                     block.block_id = None
                     deallocated = True
                 elif block.block_id == block_id:
-                    # If block_id specified, deallocate only that specific block
                     block.status = "free"
                     block.process_id = None
                     block.block_id = None
                     deallocated = True
-                    break  # Exit after deallocating the specific block
+                    break
         
         if deallocated:
             self.merge_free_blocks()
+            # Track deallocation time
+            deallocation_time = (datetime.now() - start_time).total_seconds()
+            self.performance_metrics["deallocation_times"].append(deallocation_time)
+        
         return deallocated
 
     def merge_free_blocks(self):
@@ -365,23 +407,23 @@ class MemoryManager:
                 self.page_references.append(lru_frame)
 
     def access_page(self, process_id, page_number):
-        """Simulate page access"""
+        """Simulate page access and track performance"""
         if process_id in self.page_table:
             pages = self.page_table[process_id]
             if 0 <= page_number < len(pages):
                 page = pages[page_number]
                 if page.is_valid:
                     self.page_hits += 1
+                    self.performance_metrics["page_hit_history"].append(datetime.now())
                     if self.replacement_algorithm == "LRU":
-                        # Update access time for LRU
                         self.page_access_times[page.frame_number] = datetime.now()
-                        # Update reference sequence
                         if page.frame_number in self.page_references:
                             self.page_references.remove(page.frame_number)
                         self.page_references.append(page.frame_number)
                     return True
                 else:
                     self.handle_page_fault(page)
+                    self.performance_metrics["page_fault_history"].append(datetime.now())
                     return True
         return False
 
@@ -425,6 +467,187 @@ class MemoryManager:
                 stats["least_recently_used"] = f"Frame {lru_page}"
         
         return stats
+
+    def calculate_fragmentation(self):
+        """Calculate external fragmentation percentage"""
+        free_blocks = [
+            block.size for block in self.memory 
+            if block.status == "free"
+        ]
+        
+        if not free_blocks:
+            return 0.0
+            
+        largest_free_block = max(free_blocks)
+        total_free = sum(free_blocks)
+        fragmentation = (1 - (largest_free_block / total_free)) * 100
+        return fragmentation
+
+    def get_performance_metrics(self):
+        """Get current performance metrics"""
+        current_usage = sum(block.size for block in self.memory if block.status == "allocated")
+        current_fragmentation = self.calculate_fragmentation()
+        
+        # Update metrics
+        self.performance_metrics["memory_usage"].append(current_usage)
+        self.performance_metrics["peak_memory"] = max(
+            self.performance_metrics["peak_memory"],
+            current_usage
+        )
+        self.performance_metrics["fragmentation_history"].append(current_fragmentation)
+        
+        # Calculate page management metrics
+        total_accesses = self.page_faults + self.page_hits
+        if total_accesses > 0:
+            hit_ratio = self.page_hits / total_accesses
+            fault_ratio = self.page_faults / total_accesses
+        else:
+            hit_ratio = fault_ratio = 0
+            
+        # Calculate algorithm performance
+        for algorithm in self.algorithm_stats:
+            stats = self.algorithm_stats[algorithm]
+            total_attempts = stats["allocations"] + stats["failures"]
+            if total_attempts > 0:
+                self.performance_metrics["algorithm_performance"][algorithm]["success_rate"] = (
+                    stats["allocations"] / total_attempts
+                )
+        
+        return {
+            "current_usage": current_usage,
+            "peak_memory": self.performance_metrics["peak_memory"],
+            "memory_usage_history": self.performance_metrics["memory_usage"],
+            "fragmentation_history": self.performance_metrics["fragmentation_history"],
+            "page_management": {
+                "hit_ratio": hit_ratio,
+                "fault_ratio": fault_ratio,
+                "total_accesses": total_accesses
+            },
+            "algorithm_performance": self.performance_metrics["algorithm_performance"],
+            "operation_times": {
+                "allocation": self.performance_metrics["allocation_times"],
+                "deallocation": self.performance_metrics["deallocation_times"]
+            }
+        }
+
+    def analyze_fragmentation(self):
+        """Analyze both external and internal fragmentation"""
+        # Calculate external fragmentation
+        free_blocks = [block for block in self.memory if block.status == "free"]
+        total_free = sum(block.size for block in free_blocks)
+        if total_free > 0:
+            largest_free = max(block.size for block in free_blocks)
+            external_frag = (1 - (largest_free / total_free)) * 100
+        else:
+            external_frag = 0
+
+        # Calculate internal fragmentation
+        internal_frag = 0
+        total_wasted = 0
+        for block in self.memory:
+            if block.status == "allocated":
+                # Calculate wasted space within allocated blocks
+                wasted = block.size - (block.size // self.page_size) * self.page_size
+                total_wasted += wasted
+                internal_frag += (wasted / block.size) * 100
+
+        # Update metrics
+        self.fragmentation_metrics["external_fragmentation"].append(external_frag)
+        self.fragmentation_metrics["internal_fragmentation"].append(internal_frag)
+        self.fragmentation_metrics["total_wasted_space"] = total_wasted
+        self.fragmentation_metrics["fragmentation_history"].append({
+            "time": datetime.now(),
+            "external": external_frag,
+            "internal": internal_frag,
+            "total_wasted": total_wasted
+        })
+
+        return {
+            "external_fragmentation": external_frag,
+            "internal_fragmentation": internal_frag,
+            "total_wasted_space": total_wasted
+        }
+
+    def schedule_process(self, process_id, priority=0):
+        """Schedule a process for memory allocation"""
+        if process_id not in self.scheduling_metrics["waiting_times"]:
+            self.scheduling_metrics["waiting_times"][process_id] = {
+                "start_time": datetime.now(),
+                "priority": priority
+            }
+            self.scheduling_metrics["process_queue"].append(process_id)
+            self.scheduling_metrics["scheduling_history"].append({
+                "time": datetime.now(),
+                "process_id": process_id,
+                "action": "queued",
+                "priority": priority
+            })
+
+    def update_scheduling_metrics(self):
+        """Update process scheduling metrics"""
+        current_time = datetime.now()
+        
+        # Update waiting times
+        for process_id, data in self.scheduling_metrics["waiting_times"].items():
+            if process_id in self.scheduling_metrics["process_queue"]:
+                wait_time = (current_time - data["start_time"]).total_seconds()
+                data["current_wait"] = wait_time
+
+        # Calculate CPU utilization (simplified)
+        active_processes = len([p for p in self.scheduling_metrics["process_queue"] 
+                              if p in self.page_table])
+        total_processes = len(self.scheduling_metrics["process_queue"])
+        cpu_util = (active_processes / total_processes * 100) if total_processes > 0 else 0
+        
+        self.scheduling_metrics["cpu_utilization"].append(cpu_util)
+
+    def get_fragmentation_report(self):
+        """Generate a detailed fragmentation report"""
+        analysis = self.analyze_fragmentation()
+        return {
+            "current_metrics": analysis,
+            "historical_data": self.fragmentation_metrics["fragmentation_history"],
+            "recommendations": self.generate_fragmentation_recommendations(analysis)
+        }
+
+    def get_scheduling_report(self):
+        """Generate a detailed scheduling report"""
+        self.update_scheduling_metrics()
+        return {
+            "queue_status": {
+                "total_processes": len(self.scheduling_metrics["process_queue"]),
+                "waiting_times": self.scheduling_metrics["waiting_times"],
+                "cpu_utilization": self.scheduling_metrics["cpu_utilization"][-1] if self.scheduling_metrics["cpu_utilization"] else 0
+            },
+            "scheduling_history": self.scheduling_metrics["scheduling_history"],
+            "recommendations": self.generate_scheduling_recommendations()
+        }
+
+    def generate_fragmentation_recommendations(self, analysis):
+        """Generate recommendations based on fragmentation analysis"""
+        recommendations = []
+        
+        if analysis["external_fragmentation"] > 70:
+            recommendations.append("High external fragmentation detected. Consider memory compaction.")
+        if analysis["internal_fragmentation"] > 30:
+            recommendations.append("High internal fragmentation detected. Consider adjusting page size.")
+        if analysis["total_wasted_space"] > MEMORY_SIZE * 0.2:
+            recommendations.append("Significant memory waste detected. Review allocation strategy.")
+            
+        return recommendations
+
+    def generate_scheduling_recommendations(self):
+        """Generate recommendations based on scheduling metrics"""
+        recommendations = []
+        
+        avg_wait_time = sum(data["current_wait"] for data in self.scheduling_metrics["waiting_times"].values()) / len(self.scheduling_metrics["waiting_times"]) if self.scheduling_metrics["waiting_times"] else 0
+        
+        if avg_wait_time > 5:  # 5 seconds threshold
+            recommendations.append("High process waiting times detected. Consider increasing memory size.")
+        if self.scheduling_metrics["cpu_utilization"][-1] < 50:
+            recommendations.append("Low CPU utilization. Consider optimizing memory allocation strategy.")
+            
+        return recommendations
 
 class MemoryVisualizer:
     def __init__(self, root):
@@ -686,7 +909,56 @@ class MemoryVisualizer:
         self.paging_stats_label = ttk.Label(left_frame, text="", font=('Helvetica', 10))
         self.paging_stats_label.pack(pady=5)
         
-        # Add access pattern graph to right frame
+        # Create performance metrics panel in right frame
+        self.performance_frame = ttk.LabelFrame(right_frame, text="Performance Metrics", padding=10)
+        self.performance_frame.pack(fill="x", pady=5)
+        
+        # Create metrics display areas
+        self.metrics_labels = {}
+        
+        # Memory Usage Metrics
+        memory_frame = ttk.LabelFrame(self.performance_frame, text="Memory Usage", padding=5)
+        memory_frame.pack(fill="x", pady=5)
+        
+        self.metrics_labels["current_usage"] = ttk.Label(memory_frame, text="Current Usage: 0 units")
+        self.metrics_labels["current_usage"].pack(anchor="w")
+        
+        self.metrics_labels["peak_memory"] = ttk.Label(memory_frame, text="Peak Memory: 0 units")
+        self.metrics_labels["peak_memory"].pack(anchor="w")
+        
+        # Page Management Metrics
+        page_frame = ttk.LabelFrame(self.performance_frame, text="Page Management", padding=5)
+        page_frame.pack(fill="x", pady=5)
+        
+        self.metrics_labels["hit_ratio"] = ttk.Label(page_frame, text="Hit Ratio: 0%")
+        self.metrics_labels["hit_ratio"].pack(anchor="w")
+        
+        self.metrics_labels["fault_ratio"] = ttk.Label(page_frame, text="Fault Ratio: 0%")
+        self.metrics_labels["fault_ratio"].pack(anchor="w")
+        
+        # Algorithm Performance
+        algo_frame = ttk.LabelFrame(self.performance_frame, text="Algorithm Performance", padding=5)
+        algo_frame.pack(fill="x", pady=5)
+        
+        self.metrics_labels["algorithm_stats"] = {}
+        for algorithm in ["first_fit", "best_fit", "worst_fit", "next_fit"]:
+            self.metrics_labels["algorithm_stats"][algorithm] = ttk.Label(
+                algo_frame, 
+                text=f"{algorithm.replace('_', ' ').title()}: 0% success rate"
+            )
+            self.metrics_labels["algorithm_stats"][algorithm].pack(anchor="w")
+        
+        # Operation Times
+        time_frame = ttk.LabelFrame(self.performance_frame, text="Operation Times", padding=5)
+        time_frame.pack(fill="x", pady=5)
+        
+        self.metrics_labels["avg_allocation"] = ttk.Label(time_frame, text="Avg Allocation Time: 0.0s")
+        self.metrics_labels["avg_allocation"].pack(anchor="w")
+        
+        self.metrics_labels["avg_deallocation"] = ttk.Label(time_frame, text="Avg Deallocation Time: 0.0s")
+        self.metrics_labels["avg_deallocation"].pack(anchor="w")
+        
+        # Add access pattern graph below performance metrics
         self.add_access_pattern_graph(right_frame)
         
         # Initially hide paging and segmentation controls
@@ -901,23 +1173,136 @@ class MemoryVisualizer:
     def create_segment(self):
         """Create a new segment"""
         try:
-            size = int(self.size_entry.get())
-            name = self.segment_name_entry.get()
-            process_id = self.process_entry.get()
+            # Get and validate size
+            size_str = self.size_entry.get().strip()
+            if not size_str:
+                messagebox.showwarning(
+                    "Missing Information",
+                    "Please enter a Size for the segment.\n\n"
+                    "Example: 20, 30, 40, etc.\n"
+                    "Tip: Size should be a positive number."
+                )
+                return
             
-            if not process_id:
-                messagebox.showerror("Error", "Please enter a Process ID")
+            try:
+                size = int(size_str)
+            except ValueError:
+                messagebox.showerror(
+                    "Invalid Size",
+                    f"The Size '{size_str}' is invalid.\n\n"
+                    "Size must be a whole number.\n"
+                    "Example: 20, 30, 40, etc.\n"
+                    "Please enter a valid number."
+                )
                 return
             
             if size <= 0:
-                messagebox.showerror("Error", "Size must be positive")
+                messagebox.showerror(
+                    "Invalid Size",
+                    f"The Size '{size}' is invalid.\n\n"
+                    "Size must be positive.\n"
+                    "Please enter a positive number."
+                )
                 return
             
+            if size > MAX_MEMORY_SIZE:
+                messagebox.showerror(
+                    "Size Too Large",
+                    f"The Size '{size}' is too large.\n\n"
+                    f"Maximum allowed size is {MAX_MEMORY_SIZE} units.\n"
+                    "Please enter a smaller size."
+                )
+                return
+            
+            # Get and validate segment name
+            name = self.segment_name_entry.get().strip()
+            if not name:
+                messagebox.showwarning(
+                    "Missing Information",
+                    "Please enter a Segment Name.\n\n"
+                    "Example: Code, Data, Stack, etc.\n"
+                    "Tip: Use descriptive names for your segments."
+                )
+                return
+            
+            # Validate segment name format (only letters, numbers, and underscores)
+            if not name.replace('_', '').isalnum():
+                messagebox.showerror(
+                    "Invalid Segment Name",
+                    f"The Segment Name '{name}' is invalid.\n\n"
+                    "Segment names can only contain:\n"
+                    "• Letters (a-z, A-Z)\n"
+                    "• Numbers (0-9)\n"
+                    "• Underscores (_)\n\n"
+                    "Example: Code_Segment, Data_Segment, Stack_Segment"
+                )
+                return
+            
+            # Get and validate process ID
+            process_id = self.process_entry.get().strip()
+            if not process_id:
+                messagebox.showwarning(
+                    "Missing Information",
+                    "Please enter a Process ID.\n\n"
+                    "Example: P1, P2, etc.\n"
+                    "Tip: You can find valid Process IDs in the Active Processes list."
+                )
+                return
+            
+            if not process_id.startswith('P'):
+                messagebox.showerror(
+                    "Invalid Process ID",
+                    f"The Process ID '{process_id}' is invalid.\n\n"
+                    "Process IDs must start with 'P' followed by a number.\n"
+                    "Example: P1, P2, P3, etc.\n\n"
+                    "Please check the Active Processes list for valid Process IDs."
+                )
+                return
+            
+            # Check if process exists
+            if process_id not in self.memory_manager.page_table:
+                messagebox.showerror(
+                    "Process Not Found",
+                    f"Process '{process_id}' does not exist.\n\n"
+                    "Please check the Active Processes list for valid Process IDs.\n"
+                    "You may need to create a process first."
+                )
+                return
+            
+            # Check if segment name already exists for this process
+            if process_id in self.memory_manager.segment_table:
+                existing_segments = [s.name for s in self.memory_manager.segment_table[process_id]]
+                if name in existing_segments:
+                    messagebox.showerror(
+                        "Duplicate Segment Name",
+                        f"Segment '{name}' already exists for Process {process_id}.\n\n"
+                        "Please choose a different name for your segment."
+                    )
+                    return
+            
+            # Create the segment
             segment = self.memory_manager.create_segment(process_id, size, name)
+            
+            # Show success message with details
+            messagebox.showinfo(
+                "Segment Created Successfully",
+                f"Successfully created segment '{name}' for Process {process_id}.\n\n"
+                f"Details:\n"
+                f"• Size: {size} units\n"
+                f"• Pages Allocated: {len(segment.pages)}\n"
+                f"• Page Size: {self.memory_manager.page_size} units"
+            )
+            
             self.status_var.set(f"Created segment '{name}' for process {process_id}")
             self.update_visualization()
-        except ValueError:
-            messagebox.showerror("Error", "Please enter valid numbers")
+            
+        except Exception as e:
+            messagebox.showerror(
+                "Error",
+                f"An unexpected error occurred:\n{str(e)}\n\n"
+                "Please try again or contact support if the problem persists."
+            )
+            self.status_var.set("Error occurred during segment creation")
 
     def access_page(self):
         """Simulate page access"""
@@ -1342,6 +1727,44 @@ class MemoryVisualizer:
                 self.ax.clear()
                 self.graph_canvas.draw()
 
+        # Update performance metrics
+        metrics = self.memory_manager.get_performance_metrics()
+        
+        # Update memory usage metrics
+        self.metrics_labels["current_usage"].config(
+            text=f"Current Usage: {metrics['current_usage']} units"
+        )
+        self.metrics_labels["peak_memory"].config(
+            text=f"Peak Memory: {metrics['peak_memory']} units"
+        )
+        
+        # Update page management metrics
+        self.metrics_labels["hit_ratio"].config(
+            text=f"Hit Ratio: {metrics['page_management']['hit_ratio']:.1%}"
+        )
+        self.metrics_labels["fault_ratio"].config(
+            text=f"Fault Ratio: {metrics['page_management']['fault_ratio']:.1%}"
+        )
+        
+        # Update algorithm performance metrics
+        for algorithm, stats in metrics['algorithm_performance'].items():
+            self.metrics_labels["algorithm_stats"][algorithm].config(
+                text=f"{algorithm.replace('_', ' ').title()}: {stats['success_rate']:.1%} success rate"
+            )
+        
+        # Update operation times
+        if metrics['operation_times']['allocation']:
+            avg_alloc = sum(metrics['operation_times']['allocation']) / len(metrics['operation_times']['allocation'])
+            self.metrics_labels["avg_allocation"].config(
+                text=f"Avg Allocation Time: {avg_alloc:.3f}s"
+            )
+        
+        if metrics['operation_times']['deallocation']:
+            avg_dealloc = sum(metrics['operation_times']['deallocation']) / len(metrics['operation_times']['deallocation'])
+            self.metrics_labels["avg_deallocation"].config(
+                text=f"Avg Deallocation Time: {avg_dealloc:.3f}s"
+            )
+
     def calculate_fragmentation(self):
         """Calculate external fragmentation percentage"""
         free_blocks = [
@@ -1354,7 +1777,8 @@ class MemoryVisualizer:
             
         largest_free_block = max(free_blocks)
         total_free = sum(free_blocks)
-        return (1 - (largest_free_block / total_free)) * 100
+        fragmentation = (1 - (largest_free_block / total_free)) * 100
+        return fragmentation
 
     def on_block_select(self, event):
         """Handle block selection in process list"""
