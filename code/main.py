@@ -3,6 +3,8 @@ from tkinter import ttk, messagebox
 import random
 from collections import OrderedDict
 from datetime import datetime
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 # Constants
 MEMORY_SIZE = 100  # Total memory size
@@ -431,11 +433,22 @@ class MemoryVisualizer:
         self.memory_manager = MemoryManager()
 
         # Configure main window
-        self.root.geometry("1000x700")  # Increased window size
+        self.root.geometry("1200x900")  # Increased window size
         
-        # Create main frames
-        control_frame = ttk.LabelFrame(root, text="Controls", padding=10)
-        control_frame.pack(fill="x", padx=10, pady=5)
+        # Create main container frame
+        main_container = ttk.Frame(root)
+        main_container.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        # Create left and right frames for better organization
+        left_frame = ttk.Frame(main_container)
+        left_frame.pack(side="left", fill="both", expand=True)
+        
+        right_frame = ttk.Frame(main_container)
+        right_frame.pack(side="right", fill="both", expand=True)
+        
+        # Create main frames in left frame
+        control_frame = ttk.LabelFrame(left_frame, text="Controls", padding=10)
+        control_frame.pack(fill="x", pady=5)
         
         # Memory size configuration
         ttk.Label(control_frame, text="Total Memory Size:").grid(row=0, column=0, padx=5)
@@ -451,7 +464,7 @@ class MemoryVisualizer:
         self.update_memory_button.grid(row=0, column=2, padx=5)
         
         # Process list frame
-        process_frame = ttk.LabelFrame(root, text="Active Processes", padding=10)
+        process_frame = ttk.LabelFrame(left_frame, text="Active Processes", padding=10)
         process_frame.pack(fill="x", padx=10, pady=5)
         
         # Create process list with block selection
@@ -468,9 +481,9 @@ class MemoryVisualizer:
         # Add double-click binding for block selection
         self.process_tree.bind("<Double-1>", self.on_block_select)
         
-        # Create canvas with scrollbars
-        canvas_frame = ttk.Frame(root)
-        canvas_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        # Create canvas with scrollbars in left frame
+        canvas_frame = ttk.Frame(left_frame)
+        canvas_frame.pack(fill="both", expand=True, pady=5)
         
         # Add horizontal scrollbar
         h_scrollbar = ttk.Scrollbar(canvas_frame, orient="horizontal")
@@ -547,12 +560,12 @@ class MemoryVisualizer:
         ttk.Label(legend_frame, text="Allocated Memory", background="salmon").pack(side="left", padx=5)
         
         # Statistics display
-        self.stats_label = ttk.Label(root, text="", font=('Helvetica', 10))
+        self.stats_label = ttk.Label(left_frame, text="", font=('Helvetica', 10))
         self.stats_label.pack(pady=5)
         
         # Status bar
         self.status_var = tk.StringVar()
-        self.status_bar = ttk.Label(root, textvariable=self.status_var, relief="sunken")
+        self.status_bar = ttk.Label(left_frame, textvariable=self.status_var, relief="sunken")
         self.status_bar.pack(fill="x", padx=10, pady=2)
         
         # Bind hover events
@@ -579,7 +592,7 @@ class MemoryVisualizer:
         self.zoom_label.pack(side="left", padx=5)
         
         # Add algorithm statistics frame
-        stats_frame = ttk.LabelFrame(root, text="Algorithm Statistics", padding=10)
+        stats_frame = ttk.LabelFrame(left_frame, text="Algorithm Statistics", padding=10)
         stats_frame.pack(fill="x", padx=10, pady=5)
         
         # Create statistics labels
@@ -670,8 +683,11 @@ class MemoryVisualizer:
         self.access_page_button.pack(side="left", padx=5)
         
         # Add paging statistics display
-        self.paging_stats_label = ttk.Label(root, text="", font=('Helvetica', 10))
+        self.paging_stats_label = ttk.Label(left_frame, text="", font=('Helvetica', 10))
         self.paging_stats_label.pack(pady=5)
+        
+        # Add access pattern graph to right frame
+        self.add_access_pattern_graph(right_frame)
         
         # Initially hide paging and segmentation controls
         self.paging_frame.grid_remove()
@@ -840,14 +856,26 @@ class MemoryVisualizer:
             self.paging_frame.grid()
             self.segmentation_frame.grid_remove()
             self.page_access_frame.grid()
+            # Show and reset graph
+            self.graph_frame.pack(fill="both", expand=True, pady=5)
+            self.access_times = []
+            self.fault_rates = []
+            self.update_access_pattern_graph()
         elif mode == "segmentation":
             self.paging_frame.grid()
             self.segmentation_frame.grid()
             self.page_access_frame.grid()
+            # Show and reset graph
+            self.graph_frame.pack(fill="both", expand=True, pady=5)
+            self.access_times = []
+            self.fault_rates = []
+            self.update_access_pattern_graph()
         else:
             self.paging_frame.grid_remove()
             self.segmentation_frame.grid_remove()
             self.page_access_frame.grid_remove()
+            # Hide graph
+            self.graph_frame.pack_forget()
         
         self.update_visualization()
 
@@ -914,6 +942,64 @@ class MemoryVisualizer:
             self.update_visualization()
         except ValueError:
             messagebox.showerror("Error", "Please enter valid numbers")
+
+    def add_access_pattern_graph(self, parent_frame):
+        """Add memory access pattern visualization"""
+        # Create graph frame
+        self.graph_frame = ttk.LabelFrame(parent_frame, text="Memory Access Patterns", padding=5)
+        self.graph_frame.pack(fill="both", expand=True, pady=5)
+        
+        # Create matplotlib figure with larger size
+        self.fig, self.ax = plt.subplots(figsize=(6, 4))
+        self.graph_canvas = FigureCanvasTkAgg(self.fig, master=self.graph_frame)
+        self.graph_canvas.get_tk_widget().pack(fill="both", expand=True)
+        
+        # Initialize data
+        self.access_times = []
+        self.fault_rates = []
+        
+        # Set up the plot with better styling
+        self.ax.set_title("Page Fault Rate Over Time", pad=20)
+        self.ax.set_xlabel("Access Time")
+        self.ax.set_ylabel("Fault Rate")
+        self.ax.grid(True, linestyle='--', alpha=0.7)
+        
+        # Initialize the line plot with better styling
+        self.line, = self.ax.plot([], [], 'b-', label='Fault Rate', linewidth=2)
+        self.ax.legend(loc='upper right')
+        
+        # Set y-axis limits
+        self.ax.set_ylim(0, 1.0)
+        
+        # Add some padding to the plot
+        self.fig.tight_layout()
+
+    def update_access_pattern_graph(self):
+        """Update the access pattern graph"""
+        if not hasattr(self, 'graph_frame'):
+            return
+            
+        # Get current statistics
+        stats = self.memory_manager.get_paging_stats()
+        current_fault_rate = stats['fault_rate']
+        
+        # Update data
+        self.access_times.append(len(self.access_times))
+        self.fault_rates.append(current_fault_rate)
+        
+        # Update plot
+        self.line.set_data(self.access_times, self.fault_rates)
+        self.ax.relim()
+        self.ax.autoscale_view()
+        
+        # Ensure y-axis stays between 0 and 1
+        self.ax.set_ylim(0, 1.0)
+        
+        # Add some padding to the plot
+        self.fig.tight_layout()
+        
+        # Draw the canvas
+        self.graph_canvas.draw()
 
     def update_visualization(self):
         """Update the memory visualization"""
@@ -1133,7 +1219,7 @@ class MemoryVisualizer:
                      f"Success Rate: {success_rate:.1%}"
             )
         
-        # Update paging statistics
+        # Update paging statistics and graph
         if mode in ["paging", "segmentation"]:
             stats = self.memory_manager.get_paging_stats()
             stats_text = (
@@ -1154,8 +1240,15 @@ class MemoryVisualizer:
                     stats_text += f" | LRU Page: {stats['least_recently_used']}"
             
             self.paging_stats_label.config(text=stats_text)
+            
+            # Update the access pattern graph
+            self.update_access_pattern_graph()
         else:
             self.paging_stats_label.config(text="")
+            # Clear the graph when not in paging/segmentation mode
+            if hasattr(self, 'graph_frame'):
+                self.ax.clear()
+                self.graph_canvas.draw()
 
     def calculate_fragmentation(self):
         """Calculate external fragmentation percentage"""
