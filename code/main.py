@@ -183,6 +183,8 @@ class MemoryManager:
         # Update statistics
         if success:
             self.algorithm_stats[self.algorithm]["allocations"] += 1
+            # Also create the process in the paging system
+            self.allocate_pages(process_id, size)
         else:
             self.algorithm_stats[self.algorithm]["failures"] += 1
         
@@ -391,7 +393,17 @@ class MemoryManager:
 
     def access_page(self, process_id, page_number):
         """Simulate page access"""
-        if process_id in self.page_table:
+        try:
+            if process_id not in self.page_table:
+                # Check if process exists in memory but not in page table
+                process_exists = any(block.process_id == process_id for block in self.memory)
+                if process_exists:
+                    # Process exists in memory but not in page table, create it
+                    size = sum(block.size for block in self.memory if block.process_id == process_id)
+                    self.allocate_pages(process_id, size)
+                else:
+                    return False, "Process not found in memory"
+            
             pages = self.page_table[process_id]
             if 0 <= page_number < len(pages):
                 page = pages[page_number]
@@ -402,11 +414,14 @@ class MemoryManager:
                         if page.frame_number in self.page_references:
                             self.page_references.remove(page.frame_number)
                         self.page_references.append(page.frame_number)
-                    return True
+                    return True, "Page access successful"
                 else:
                     self.handle_page_fault(page)
-                    return True
-        return False
+                    return True, "Page fault handled successfully"
+            else:
+                return False, f"Invalid page number. Process {process_id} has {len(pages)} pages (0 to {len(pages)-1})"
+        except Exception as e:
+            return False, f"Error accessing page: {str(e)}"
 
     def create_segment(self, process_id, size, name=None):
         """Create a new segment for a process"""
@@ -1443,7 +1458,7 @@ class MemoryVisualizer:
                 return
             
             # Attempt to access the page
-            success = self.memory_manager.access_page(process_id, page_number)
+            success, message = self.memory_manager.access_page(process_id, page_number)
             
             if success:
                 # Show success message with details
@@ -1463,9 +1478,7 @@ class MemoryVisualizer:
                     "Access Failed",
                     f"Failed to access Page {page_number} of Process {process_id}.\n\n"
                     "This might be due to:\n"
-                    "• Invalid page number\n"
-                    "• Process not found\n"
-                    "• Memory allocation issues"
+                    f"• {message}\n"
                 )
                 self.status_var.set(f"Failed to access page {page_number} of process {process_id}")
             
